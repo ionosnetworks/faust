@@ -13,7 +13,6 @@ from typing import (
     Iterable,
     List,
     Mapping,
-    MutableMapping,
     MutableSet,
     Optional,
     Sequence,
@@ -141,7 +140,8 @@ class TransactionProducerT(ProducerT):
         ...
 
     @abc.abstractmethod
-    async def commit(self, offsets: Mapping[TP, int], group_id: str) -> None:
+    async def commit(self, offsets: Mapping[TP, int], group_id: str,
+                     start_new_transaction: bool = True) -> None:
         ...
 
     @property
@@ -150,11 +150,18 @@ class TransactionProducerT(ProducerT):
         ...
 
 
-class TransactionManagerT(ServiceT):
+class TransactionManagerT(ProducerT):
     consumer: 'ConsumerT'
+    default_producer: 'ProducerT'
 
     @abc.abstractmethod
-    def __init__(self, consumer: 'ConsumerT', **kwargs: Any) -> None:
+    def __init__(self,
+                 transport: 'TransportT',
+                 loop: asyncio.AbstractEventLoop = None,
+                 *,
+                 consumer: 'ConsumerT',
+                 producer: 'ProducerT',
+                 **kwargs: Any) -> None:
         ...
 
     @abc.abstractmethod
@@ -169,13 +176,8 @@ class TransactionManagerT(ServiceT):
         ...
 
     @abc.abstractmethod
-    async def send(self, topic: str, key: Optional[bytes],
-                   value: Optional[bytes],
-                   partition: Optional[int]) -> Awaitable[RecordMetadata]:
-        ...
-
-    @abc.abstractmethod
-    async def commit(self, offsets: Mapping[TP, int]) -> bool:
+    async def commit(self, offsets: Mapping[TP, int],
+                     start_new_transaction: bool = True) -> bool:
         ...
 
 
@@ -194,6 +196,8 @@ class ConsumerT(ServiceT):
     #: This means we don't crash if it's not part of our assignment.
     #: Used by e.g. the leader assignor service.
     randomly_assigned_topics: Set[str]
+
+    in_transaction: bool
 
     @abc.abstractmethod
     def __init__(self,
@@ -285,7 +289,9 @@ class ConsumerT(ServiceT):
         ...
 
     @abc.abstractmethod
-    async def commit(self, topics: TPorTopicSet = None) -> bool:
+    async def commit(self,
+                     topics: TPorTopicSet = None,
+                     start_new_transaction: bool = True) -> bool:
         ...
 
     @abc.abstractmethod
@@ -293,12 +299,11 @@ class ConsumerT(ServiceT):
         ...
 
     @abc.abstractmethod
-    async def earliest_offsets(self,
-                               *partitions: TP) -> MutableMapping[TP, int]:
+    async def earliest_offsets(self, *partitions: TP) -> Mapping[TP, int]:
         ...
 
     @abc.abstractmethod
-    async def highwaters(self, *partitions: TP) -> MutableMapping[TP, int]:
+    async def highwaters(self, *partitions: TP) -> Mapping[TP, int]:
         ...
 
     @abc.abstractmethod
@@ -407,6 +412,7 @@ class TransportT(abc.ABC):
     @abc.abstractmethod
     def create_transaction_manager(self,
                                    consumer: ConsumerT,
+                                   producer: ProducerT,
                                    **kwargs: Any) -> TransactionManagerT:
         ...
 

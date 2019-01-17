@@ -115,8 +115,8 @@ class Consumer(ThreadDelegateConsumer):
             partitions,
             replication,
             config=config,
-            timeout=int(want_seconds(timeout) * 1000.0),
-            retention=int(want_seconds(retention) * 1000.0),
+            timeout=timeout,
+            retention=retention,
             compacting=compacting,
             deleting=deleting,
             ensure_created=ensure_created,
@@ -162,6 +162,10 @@ class AIOKafkaConsumerThread(ConsumerThread):
         self._consumer = self._create_consumer(loop=self.thread_loop)
         await self._consumer.start()
 
+    async def on_thread_stop(self) -> None:
+        if self._consumer is not None:
+            await self._consumer.stop()
+
     def _create_consumer(
             self,
             loop: asyncio.AbstractEventLoop) -> aiokafka.AIOKafkaConsumer:
@@ -175,7 +179,10 @@ class AIOKafkaConsumerThread(ConsumerThread):
             self,
             transport: 'Transport',
             loop: asyncio.AbstractEventLoop) -> aiokafka.AIOKafkaConsumer:
+        isolation_level: str = 'read_uncommitted'
         conf = self.app.conf
+        if self.consumer.in_transaction:
+            isolation_level = 'read_committed'
         self._assignor = self.app.assignor
         return aiokafka.AIOKafkaConsumer(
             loop=loop,
@@ -195,6 +202,7 @@ class AIOKafkaConsumerThread(ConsumerThread):
             heartbeat_interval_ms=int(conf.broker_heartbeat_interval * 1000.0),
             security_protocol="SSL" if conf.ssl_context else "PLAINTEXT",
             ssl_context=conf.ssl_context,
+            isolation_level=isolation_level,
         )
 
     def _create_client_consumer(
@@ -285,7 +293,10 @@ class AIOKafkaConsumerThread(ConsumerThread):
         return ensure_TPset(self._ensure_consumer().assignment())
 
     def highwater(self, tp: TP) -> int:
-        return self._ensure_consumer().highwater(tp)
+        if self.consumer.in_transaction:
+            return self._ensure_consumer().last_stable_offset(tp)
+        else:
+            return self._ensure_consumer().highwater(tp)
 
     def topic_partitions(self, topic: str) -> Optional[int]:
         if self._consumer is not None:
@@ -293,13 +304,27 @@ class AIOKafkaConsumerThread(ConsumerThread):
         return None
 
     async def earliest_offsets(self,
-                               *partitions: TP) -> MutableMapping[TP, int]:
+                               *partitions: TP) -> Mapping[TP, int]:
         return await self.call_thread(
             self._ensure_consumer().beginning_offsets, partitions)
 
-    async def highwaters(self, *partitions: TP) -> MutableMapping[TP, int]:
-        return await self.call_thread(
-            self._ensure_consumer().end_offsets, partitions)
+    async def highwaters(self, *partitions: TP) -> Mapping[TP, int]:
+
+        return await self.call_thread(self._highwaters, partitions)
+
+    async def _highwaters(self, partitions: List[TP]) -> Mapping[TP, int]:
+        consumer = self._ensure_consumer()
+        if self.consumer.in_transaction:
+            return {
+                tp: self._lso_to_highwater(consumer.last_stable_offset(tp))
+                for tp in partitions
+            }
+        else:
+            return cast(Mapping[TP, int],
+                        await consumer.end_offsets(partitions))
+
+    def _lso_to_highwater(self, lso: int) -> int:
+        return lso - 1 if lso and lso > 0 else lso
 
     def _ensure_consumer(self) -> aiokafka.AIOKafkaConsumer:
         if self._consumer is None:
@@ -331,19 +356,20 @@ class AIOKafkaConsumerThread(ConsumerThread):
                            compacting: bool = None,
                            deleting: bool = None,
                            ensure_created: bool = False) -> None:
-        consumer = self.consumer
-        transport = cast(Transport, consumer.transport)
+        transport = cast(Transport, self.consumer.transport)
         _consumer = self._ensure_consumer()
+        _retention = (int(want_seconds(retention) * 1000.0)
+                      if retention else None)
         await self.call_thread(
             transport._create_topic,
-            consumer,
+            self,
             _consumer._client,
             topic,
             partitions,
             replication,
             config=config,
             timeout=int(want_seconds(timeout) * 1000.0),
-            retention=int(want_seconds(retention) * 1000.0),
+            retention=_retention,
             compacting=compacting,
             deleting=deleting,
             ensure_created=ensure_created,
@@ -484,15 +510,20 @@ class TransactionProducer(Producer, base.TransactionProducer):
 
     async def on_start(self) -> None:
         await super().on_start()
-        await self._producer.start_transaction()
+        await self._producer.begin_transaction()
 
-    async def commit(self, offsets: Mapping[TP, int], group_id: str) -> None:
+    async def commit(self, offsets: Mapping[TP, int], group_id: str,
+                     start_new_transaction: bool = True) -> None:
         await self._producer.send_offsets_to_transaction(offsets, group_id)
         await self._producer.commit_transaction()
-        await self._producer.start_transaction()
+        if start_new_transaction:
+            await self._producer.begin_transaction()
 
     async def on_stop(self) -> None:
-        assert not self._producer._txn_manager.is_in_transaction()
+        if self._producer._txn_manager.is_in_transaction():
+            self.log.info(
+                'Still in transaction: Aborting current transaction...')
+            await self._producer.abort_transaction()
 
     def _settings_extra(self) -> Mapping[str, Any]:
         return {
@@ -555,7 +586,7 @@ class Transport(base.Transport):
                 topic,
                 partitions,
                 replication,
-                loop=self.loop, **kwargs)
+                loop=asyncio.get_event_loop(), **kwargs)
         try:
             await wrap()
         except Exception:
@@ -608,7 +639,7 @@ class Transport(base.Transport):
 
         controller_node = await self._get_controller_node(owner, client,
                                                           timeout=timeout)
-        owner.log.info(f'Found controller: {controller_node}')
+        owner.log.debug(f'Found controller: {controller_node}')
 
         if controller_node is None:
             if owner.should_stop:
@@ -627,7 +658,7 @@ class Transport(base.Transport):
             timeout=timeout,
         )
         if wait_result.stopped:
-            owner.log.info(f'Shutting down - skipping creation.')
+            owner.log.debug(f'Shutting down - skipping creation.')
             return
         response = wait_result.result
 

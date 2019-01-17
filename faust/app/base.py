@@ -1172,10 +1172,15 @@ class App(AppT, Service):
     @stampede
     async def maybe_start_producer(self) -> ProducerT:
         """Ensure producer is started."""
-        producer = self.producer
-        # producer may also have been started by app.start()
-        await producer.maybe_start()
-        return producer
+        if self.in_transaction:
+            # return TransactionManager when
+            # processing_guarantee="exactly_once" enabled.
+            return self.consumer.transactions
+        else:
+            producer = self.producer
+            # producer may also have been started by app.start()
+            await producer.maybe_start()
+            return producer
 
     async def commit(self, topics: TPorTopicSet) -> bool:
         """Commit offset for acked messages in specified topics'.

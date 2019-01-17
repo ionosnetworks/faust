@@ -81,6 +81,7 @@ from faust.types.transports import (
     ConsumerT,
     PartitionsAssignedCallback,
     PartitionsRevokedCallback,
+    ProducerT,
     TPorTopicSet,
     TransactionManagerT,
     TransactionProducerT,
@@ -162,30 +163,37 @@ class Fetcher(Service):
 
 
 class TransactionManager(Service, TransactionManagerT):
+    app: AppT
     _producers: MutableMapping[int, TransactionProducerT]
 
-    def __init__(self, consumer: 'ConsumerT', **kwargs: Any) -> None:
+    def __init__(self, transport: TransportT,
+                 *,
+                 consumer: 'ConsumerT',
+                 producer: 'ProducerT',
+                 **kwargs: Any) -> None:
+        self.transport = transport
+        self.app = self.transport.app
         self.consumer = consumer
+        self.default_producer = producer
         self._producers = {}
         super().__init__(**kwargs)
 
     async def on_stop(self) -> None:
-        await asyncio.gather(*[
-            producer.stop() for producer in self._producers_values()
-        ])
+        if self._producers:
+            await asyncio.gather(*[
+                producer.stop() for producer in self._producers.values()
+            ])
+        self._producers.clear()
 
     async def on_partitions_revoked(self, revoked: Set[TP]) -> None:
         # flush all producers
-        await asyncio.gather(*[
-            producer.flush() for producer in self._producers.values()
-        ])
+        await self.flush()
 
     async def on_rebalance(self,
                            assigned: Set[TP],
                            revoked: Set[TP],
                            newly_assigned: Set[TP]) -> None:
         producers = self._producers
-        transport = self.consumer.transport
         revoked_partitions: Set[int] = {tp.partition for tp in revoked}
         assigned_partitions: Set[int] = {tp.partition for tp in newly_assigned}
 
@@ -195,16 +203,31 @@ class TransactionManager(Service, TransactionManagerT):
             producer = producers.pop(revoked_partition, None)
             if producer is not None:
                 producers_to_stop.append(producer)
-        await asyncio.gather(*[
-            producer.stop() for producer in producers_to_stop
-        ])
+        if producers_to_stop:
+            self.log.info(
+                'Stopping transactional producers for revoked partitions...')
+            await asyncio.gather(*[
+                producer.stop() for producer in producers_to_stop
+            ])
 
-        # Start producers for newly assigned partitions.
+        self.log.info(
+            'Starting transactional producers for assigned partitions...')
         for partition in assigned_partitions:
-            assert partition not in producers
-            pr = producers[partition] = transport.create_transaction_producer(
-                partition, beacon=self.beacon, loop=self.loop)
-            await pr.start()
+            producers[partition] = await self._start_new_producer(partition)
+
+    async def _start_new_producer(
+            self, partition: int) -> TransactionProducerT:
+        assert partition is not None
+        producer: TransactionProducerT
+        assert partition not in self._producers
+        producer = self._new_producer(partition)
+        await producer.start()
+        return producer
+
+    def _new_producer(self, partition: int) -> TransactionProducerT:
+        return self.transport.create_transaction_producer(
+            partition, beacon=self.beacon, loop=self.loop,
+        )
 
     async def send(self, topic: str, key: Optional[bytes],
                    value: Optional[bytes],
@@ -212,23 +235,61 @@ class TransactionManager(Service, TransactionManagerT):
         p: int = self.consumer.key_partition(topic, key, partition)
         return await self._producers[p].send(topic, key, value, p)
 
-    async def commit(self, offsets: Mapping[TP, int]) -> bool:
+    async def send_and_wait(self, topic: str, key: Optional[bytes],
+                            value: Optional[bytes],
+                            partition: Optional[int]) -> RecordMetadata:
+        fut = await self.send(topic, key, value, partition)
+        return await fut
+
+    async def commit(self, offsets: Mapping[TP, int],
+                     start_new_transaction: bool = True) -> bool:
         producers = self._producers
-        group_id = self.consumer.group_id
+        group_id = self.app.conf.id
         group_by_partitions: MutableMapping[int, MutableMapping[TP, int]]
         group_by_partitions = defaultdict(dict)
 
         for tp, offset in offsets.items():
             group_by_partitions[tp.partition][tp] = offset
 
-        await asyncio.gather(*[
-            producers[partition].commit(partition_offsets, group_id)
-            for partition, partition_offsets in group_by_partitions.items()
-        ])
+        if group_by_partitions:
+            await asyncio.gather(*[
+                producers[partition].commit(
+                    partition_offsets, group_id,
+                    start_new_transaction=start_new_transaction,
+                )
+                for partition, partition_offsets in group_by_partitions.items()
+            ])
         return True
 
     def key_partition(self, topic: str, key: bytes) -> TP:
         raise NotImplementedError()
+
+    async def flush(self) -> None:
+        if self._producers:
+            await asyncio.gather(*[
+                producer.flush() for producer in self._producers.values()
+            ])
+
+    async def create_topic(self,
+                           topic: str,
+                           partitions: int,
+                           replication: int,
+                           *,
+                           config: Mapping[str, Any] = None,
+                           timeout: Seconds = 30.0,
+                           retention: Seconds = None,
+                           compacting: bool = None,
+                           deleting: bool = None,
+                           ensure_created: bool = False) -> None:
+        return await self.default_producer.create_topic(
+            topic, partitions, replication,
+            config=config,
+            timeout=timeout,
+            retention=retention,
+            compacting=compacting,
+            deleting=deleting,
+            ensure_created=ensure_created,
+        )
 
 
 class Consumer(Service, ConsumerT):
@@ -302,6 +363,7 @@ class Consumer(Service, ConsumerT):
         assert callback is not None
         self.transport = transport
         self.app = self.transport.app
+        self.in_transaction = self.app.in_transaction
         self.callback = callback
         self._on_message_in = self.app.sensors.on_message_in
         self._on_partitions_revoked = on_partitions_revoked
@@ -326,7 +388,18 @@ class Consumer(Service, ConsumerT):
         self._reset_state()
         super().__init__(loop=loop or self.transport.loop, **kwargs)
         self.transactions = self.transport.create_transaction_manager(
-            self, beacon=self.beacon, loop=self.loop)
+            consumer=self,
+            producer=self.app.producer,
+            beacon=self.beacon,
+            loop=self.loop,
+        )
+
+    def on_init_dependencies(self) -> Iterable[ServiceT]:
+        # We start the TransactionManager only if
+        # processing_guarantee='exactly_once'
+        if self.in_transaction:
+            return [self.transactions]
+        return []
 
     def _reset_state(self) -> None:
         self._active_partitions = None
@@ -606,13 +679,17 @@ class Consumer(Service, ConsumerT):
             await self._wait_for_ack(timeout=1)
 
         self.log.dev('COMMITTING AGAIN AFTER STREAMS DONE')
-        await self.commit()
+        await self.commit_and_end_transactions()
+
+    async def commit_and_end_transactions(self) -> None:
+        await self.commit(start_new_transaction=False)
 
     async def on_stop(self) -> None:
         if self.app.conf.stream_wait_empty:
             await self.wait_empty()
         else:
-            await self.commit()
+            await self.commit_and_end_transactions()
+
         self._last_batch = None
 
     @Service.task
@@ -635,8 +712,8 @@ class Consumer(Service, ConsumerT):
                         'Possible livelock: COMMIT OFFSET NOT ADVANCING')
             await self.sleep(interval)
 
-    async def commit(
-            self, topics: TPorTopicSet = None) -> bool:  # pragma: no cover
+    async def commit(self, topics: TPorTopicSet = None,
+                     start_new_transaction: bool = True) -> bool:
         """Maybe commit the offset for all or specific topics.
 
         Arguments:
@@ -648,7 +725,10 @@ class Consumer(Service, ConsumerT):
 
         self._commit_fut = asyncio.Future(loop=self.loop)
         try:
-            return await self.force_commit(topics)
+            return await self.force_commit(
+                topics,
+                start_new_transaction=start_new_transaction,
+            )
         finally:
             # set commit_fut to None so that next call will commit.
             fut, self._commit_fut = self._commit_fut, None
@@ -672,17 +752,21 @@ class Consumer(Service, ConsumerT):
         return False
 
     @Service.transitions_to(CONSUMER_COMMITTING)
-    async def force_commit(self, topics: TPorTopicSet = None) -> bool:
+    async def force_commit(self,
+                           topics: TPorTopicSet = None,
+                           start_new_transaction: bool = True) -> bool:
         sensor_state = self.app.sensors.on_commit_initiated(self)
 
         # Go over the ack list in each topic/partition
         commit_tps = list(self._filter_tps_with_pending_acks(topics))
-        did_commit = await self._commit_tps(commit_tps)
+        did_commit = await self._commit_tps(commit_tps, start_new_transaction)
 
         self.app.sensors.on_commit_completed(self, sensor_state)
         return did_commit
 
-    async def _commit_tps(self, tps: Iterable[TP]) -> bool:
+    async def _commit_tps(self,
+                          tps: Iterable[TP],
+                          start_new_transaction: bool) -> bool:
         commit_offsets = self._filter_committable_offsets(tps)
         if commit_offsets:
             try:
@@ -691,7 +775,8 @@ class Consumer(Service, ConsumerT):
             except ProducerSendError as exc:
                 await self.crash(exc)
             else:
-                return await self._commit_offsets(commit_offsets)
+                return await self._commit_offsets(
+                    commit_offsets, start_new_transaction)
         return False
 
     def _filter_committable_offsets(self, tps: Iterable[TP]) -> Dict[TP, int]:
@@ -724,7 +809,8 @@ class Consumer(Service, ConsumerT):
             if pending:
                 await producer.wait_many(pending)
 
-    async def _commit_offsets(self, offsets: Mapping[TP, int]) -> bool:
+    async def _commit_offsets(self, offsets: Mapping[TP, int],
+                              start_new_transaction: bool = True) -> bool:
         table = terminal.logtable(
             [(str(tp), str(offset))
              for tp, offset in offsets.items()],
@@ -751,8 +837,9 @@ class Consumer(Service, ConsumerT):
         with flight_recorder(self.log, timeout=300.0) as on_timeout:
             did_commit = False
             on_timeout.info('+consumer.commit()')
-            if self.app.in_transaction:
-                did_commit = await self.transactions.commit(commitable_offsets)
+            if self.in_transaction:
+                did_commit = await self.transactions.commit(
+                    commitable_offsets, start_new_transaction)
             else:
                 did_commit = await self._commit(commitable_offsets)
             on_timeout.info('-consumer.commit()')
@@ -918,12 +1005,11 @@ class ConsumerThread(QueueServiceThread):
         ...
 
     @abc.abstractmethod
-    async def earliest_offsets(self,
-                               *partitions: TP) -> MutableMapping[TP, int]:
+    async def earliest_offsets(self, *partitions: TP) -> Mapping[TP, int]:
         ...
 
     @abc.abstractmethod
-    async def highwaters(self, *partitions: TP) -> MutableMapping[TP, int]:
+    async def highwaters(self, *partitions: TP) -> Mapping[TP, int]:
         ...
 
     @abc.abstractmethod
@@ -1040,11 +1126,10 @@ class ThreadDelegateConsumer(Consumer):
     def topic_partitions(self, topic: str) -> Optional[int]:
         return self._thread.topic_partitions(topic)
 
-    async def earliest_offsets(self,
-                               *partitions: TP) -> MutableMapping[TP, int]:
+    async def earliest_offsets(self, *partitions: TP) -> Mapping[TP, int]:
         return await self._thread.earliest_offsets(*partitions)
 
-    async def highwaters(self, *partitions: TP) -> MutableMapping[TP, int]:
+    async def highwaters(self, *partitions: TP) -> Mapping[TP, int]:
         return await self._thread.highwaters(*partitions)
 
     async def _commit(self, offsets: Mapping[TP, int]) -> bool:

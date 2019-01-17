@@ -85,8 +85,14 @@ class Transport(TransportT):
 
     def create_transaction_manager(self,
                                    consumer: ConsumerT,
+                                   producer: ProducerT,
                                    **kwargs: Any) -> TransactionManagerT:
-        return self.TransactionManager(self, consumer, **kwargs)
+        return self.TransactionManager(
+            self,
+            consumer=consumer,
+            producer=producer,
+            **kwargs,
+        )
 
     def create_conductor(self, **kwargs: Any) -> ConductorT:
         return self.Conductor(app=self.app, loop=self.loop, **kwargs)

@@ -77,11 +77,16 @@ class TransactionProducer(Producer, TransactionProducerT):
         self.partition = partition
         super().__init__(transport, loop, **kwargs)
 
+    async def commit(self, offsets: Mapping[TP, int], group_id: str,
+                     start_new_transaction: bool = True) -> None:
+        conf = self.app.conf
+        raise NotImplementedError(
+            f'This transport does not support {conf.processing_guarantee}')
+
     @property
     def transaction_id(self) -> str:
         return f'{self.app.conf.id}-{self.partition}'
 
-    async def commit(self, offsets: Mapping[TP, int], group_id: str) -> None:
-        conf = self.app.conf
-        raise NotImplementedError(
-            f'This transport does not support {conf.processing_guarantee}')
+    @property
+    def label(self) -> str:
+        return f'{type(self).__name__}-{self.partition}'
