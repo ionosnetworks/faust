@@ -1142,23 +1142,26 @@ class App(AppT, Service):
 
     async def _send(self, topic: str,
                     key: Optional[bytes], value: Optional[bytes],
-                    partition: int = None) -> Awaitable[RecordMetadata]:
+                    partition: int = None,
+                    timestamp: float = None) -> Awaitable[RecordMetadata]:
         if self.in_transaction:
             return await self.consumer.transactions.send(
-                topic, key, value, partition)
+                topic, key, value, partition, timestamp)
         else:
             producer = await self.maybe_start_producer()
-            return await producer.send(topic, key, value, partition)
+            return await producer.send(topic, key, value, partition, timestamp)
 
     async def _send_and_wait(self, topic: str,
                              key: Optional[bytes], value: Optional[bytes],
-                             partition: int = None) -> RecordMetadata:
+                             partition: int = None,
+                             timestamp: float = None) -> RecordMetadata:
         if self.in_transaction:
             return await self.consumer.transactions.send_and_wait(
-                topic, key, value, partition)
+                topic, key, value, partition, timestamp)
         else:
             producer = await self.maybe_start_producer()
-            return await producer.send_and_wait(topic, key, value, partition)
+            return await producer.send_and_wait(
+                topic, key, value, partition, timestamp)
 
     @cached_property
     def in_transaction(self) -> bool:
