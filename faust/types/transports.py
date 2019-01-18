@@ -95,13 +95,15 @@ class ProducerT(ServiceT):
     @abc.abstractmethod
     async def send(self, topic: str, key: Optional[bytes],
                    value: Optional[bytes],
-                   partition: Optional[int]) -> Awaitable[RecordMetadata]:
+                   partition: Optional[int],
+                   timestamp: Optional[float]) -> Awaitable[RecordMetadata]:
         ...
 
     @abc.abstractmethod
     async def send_and_wait(self, topic: str, key: Optional[bytes],
                             value: Optional[bytes],
-                            partition: Optional[int]) -> RecordMetadata:
+                            partition: Optional[int],
+                            timestamp: Optional[float]) -> RecordMetadata:
         ...
 
     @abc.abstractmethod
@@ -317,7 +319,6 @@ class ConsumerT(ServiceT):
                       partition: int = None) -> int:
         ...
 
-    @abc.abstractmethod
     def close(self) -> None:
         ...
 
