@@ -36,6 +36,7 @@ class test_settings:
         assert conf.cache == URL(settings.CACHE_URL)
         assert conf.web == URL(settings.WEB_URL)
         assert conf.web_enabled
+        assert not conf.web_in_thread
         assert conf.datadir == conf._prepare_datadir(settings.DATADIR)
         assert conf.tabledir == conf._prepare_tabledir(settings.TABLEDIR)
         assert conf.broker_client_id == settings.BROKER_CLIENT_ID
@@ -64,7 +65,8 @@ class test_settings:
         assert conf.stream_ack_exceptions
         assert (conf.broker_max_poll_records ==
                 settings.BROKER_MAX_POLL_RECORDS)
-
+        assert (conf.consumer_auto_offset_reset ==
+                settings.CONSUMER_AUTO_OFFSET_RESET)
         assert not conf.autodiscover
         assert conf.origin is None
         assert conf.key_serializer == 'raw'
@@ -74,6 +76,7 @@ class test_settings:
         assert conf.table_standby_replicas == 1
         assert conf.topic_replication_factor == 1
         assert conf.topic_partitions == 8
+        assert conf.logging_config is None
         assert conf.loghandlers == []
         assert conf.version == 1
         assert conf.canonical_url == URL(f'http://{socket.gethostname()}:6066')
@@ -175,10 +178,13 @@ class test_settings:
                                  web_port=6069,
                                  web_host='localhost',
                                  web_transport='udp://',
+                                 web_in_thread=True,
                                  worker_redirect_stdouts=False,
                                  worker_redirect_stdouts_level='DEBUG',
                                  broker_max_poll_records=1000,
                                  timezone=pytz.timezone('US/Eastern'),
+                                 logging_config={'foo': 10},  # noqa
+                                 consumer_auto_offset_reset='latest',
                                  **kwargs) -> App:
         livelock_soft_timeout = broker_commit_livelock_soft_timeout
         app = self.App(
@@ -224,8 +230,11 @@ class test_settings:
             web_port=web_port,
             web_host=web_host,
             web_transport=web_transport,
+            web_in_thread=web_in_thread,
             worker_redirect_stdouts=worker_redirect_stdouts,
             worker_redirect_stdouts_level=worker_redirect_stdouts_level,
+            logging_config=logging_config,
+            consumer_auto_offset_reset=consumer_auto_offset_reset,
         )
         conf = app.conf
         assert conf.id == app.conf._prepare_id(id)
@@ -234,6 +243,7 @@ class test_settings:
         assert conf.cache == URL(str(cache))
         assert conf.web == URL(str(web))
         assert not conf.web_enabled
+        assert conf.web_in_thread
         assert conf.autodiscover == autodiscover
         assert conf.canonical_url == URL(str(canonical_url))
         assert conf.broker_client_id == broker_client_id
@@ -274,6 +284,8 @@ class test_settings:
         assert (conf.worker_redirect_stdouts_level ==
                 worker_redirect_stdouts_level)
         assert conf.broker_max_poll_records == broker_max_poll_records
+        assert conf.logging_config == logging_config
+        assert conf.consumer_auto_offset_reset == consumer_auto_offset_reset
         return app
 
     def test_custom_host_port_to_canonical(self,

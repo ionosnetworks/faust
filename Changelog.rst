@@ -8,6 +8,7 @@ This document contain change notes for bugfix releases in
 the Faust 1.4 series. If you're looking for previous releases,
 please visit the :ref:`history` section.
 
+<<<<<<< HEAD
 .. _version-1.4.6:
 
 1.4.6
@@ -55,10 +56,13 @@ please visit the :ref:`history` section.
         Set to :const:`True` when standbys are up to date after
         recovery.
 
+=======
+>>>>>>> add_consumer_offset_reset_option
 .. _version-1.4.3:
 
 1.4.3
 =====
+<<<<<<< HEAD
 :release-date: 2019-01-14 03:01 P.M PDT
 :release-by: Ask Solem (:github_user:`ask`)
 
@@ -81,6 +85,14 @@ please visit the :ref:`history` section.
     + oucb (:github_user:`oucb`).
 
 - **CI**: Added CPython 3.7.2 and 3.6.8 to Travis CI build matrix.
+=======
+:release-date: TBA
+:release-date: TBA
+
+- **Examples**: Fixed Django example so that it's working properly.
+
+    Contributed by Thibault Serot (:github_user:`thibserot`).
+>>>>>>> add_consumer_offset_reset_option
 
 .. _version-1.4.2:
 

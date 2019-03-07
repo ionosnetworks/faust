@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Dict,
     Iterable,
     List,
     Optional,
@@ -208,6 +209,12 @@ STREAM_PUBLISH_ON_COMMIT = False
 #: Used as the default value for :setting:`max_fetch_size`.
 CONSUMER_MAX_FETCH_SIZE = 4 * 1024 ** 2
 
+#: Where the consumer should start reading offsets when there is no initial
+#: offset, or the stored offset no longer exists, e.g. when starting a new
+#: consumer for the first time. Options include 'earliest', 'latest', 'none'.
+#: Used as default value for :setting:`consumer_auto_offset_reset`.
+CONSUMER_AUTO_OFFSET_RESET = 'earliest'
+
 #: Minimum time to batch before sending out messages from the producer.
 #: Used as the default value for :setting:`linger_ms`.
 PRODUCER_LINGER_MS = 0
@@ -286,18 +293,21 @@ class Settings(abc.ABC):
     table_standby_replicas: int = 1
     topic_replication_factor: int = 1
     topic_partitions: int = 8  # noqa: E704
+    logging_config: Optional[Dict] = None
     loghandlers: List[logging.Handler]
     producer_linger_ms: int = PRODUCER_LINGER_MS
     producer_max_batch_size: int = PRODUCER_MAX_BATCH_SIZE
     producer_acks: int = PRODUCER_ACKS
     producer_max_request_size: int = PRODUCER_MAX_REQUEST_SIZE
     consumer_max_fetch_size: int = CONSUMER_MAX_FETCH_SIZE
+    consumer_auto_offset_reset: str = CONSUMER_AUTO_OFFSET_RESET
     producer_compression_type: Optional[str] = PRODUCER_COMPRESSION_TYPE
     timezone: tzinfo = TIMEZONE
     web_enabled: bool
     web_bind: str = WEB_BIND
     web_port: int = WEB_PORT
     web_host: str = socket.gethostname()
+    web_in_thread: bool = False
     worker_redirect_stdouts: bool = True
     worker_redirect_stdouts_level: Severity = 'WARN'
 
@@ -396,6 +406,7 @@ class Settings(abc.ABC):
             tabledir: Union[Path, str] = None,
             key_serializer: CodecArg = None,
             value_serializer: CodecArg = None,
+            logging_config: Dict = None,
             loghandlers: List[logging.Handler] = None,
             table_cleanup_interval: Seconds = None,
             table_standby_replicas: int = None,
@@ -421,10 +432,12 @@ class Settings(abc.ABC):
             producer_partitioner: SymbolArg[PartitionerT] = None,
             producer_request_timeout: Seconds = None,
             consumer_max_fetch_size: int = None,
+            consumer_auto_offset_reset: str = None,
             web_bind: str = None,
             web_port: int = None,
             web_host: str = None,
             web_transport: Union[str, URL] = None,
+            web_in_thread: bool = None,
             worker_redirect_stdouts: bool = None,
             worker_redirect_stdouts_level: Severity = None,
             Agent: SymbolArg[Type[AgentT]] = None,
@@ -500,6 +513,8 @@ class Settings(abc.ABC):
             self.topic_partitions = topic_partitions
         if reply_create_topic is not None:
             self.reply_create_topic = reply_create_topic
+        if logging_config is not None:
+            self.logging_config = logging_config
         self.loghandlers = loghandlers if loghandlers is not None else []
         if stream_buffer_maxsize is not None:
             self.stream_buffer_maxsize = stream_buffer_maxsize
@@ -529,6 +544,8 @@ class Settings(abc.ABC):
             self.producer_request_timeout = producer_request_timeout
         if consumer_max_fetch_size is not None:
             self.consumer_max_fetch_size = consumer_max_fetch_size
+        if consumer_auto_offset_reset is not None:
+            self.consumer_auto_offset_reset = consumer_auto_offset_reset
         if web_bind is not None:
             self.web_bind = web_bind
         if web_port is not None:
@@ -537,6 +554,8 @@ class Settings(abc.ABC):
             self.web_host = web_host
         if web_transport is not None:
             self.web_transport = web_transport
+        if web_in_thread is not None:
+            self.web_in_thread = web_in_thread
         if worker_redirect_stdouts is not None:
             self.worker_redirect_stdouts = worker_redirect_stdouts
         if worker_redirect_stdouts_level is not None:

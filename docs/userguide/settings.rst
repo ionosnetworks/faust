@@ -295,6 +295,16 @@ be considered to be relative to the :setting:`datadir` setting.
 The format string used to generate the final :setting:`id` value by combining
 it with the :setting:`version` parameter.
 
+.. setting:: logging_config
+
+``logging_config``
+------------------
+
+.. versionadded:: 1.5.0
+
+Optional dictionary for logging configuration, as supported
+by :func:`logging.config.dictConfig`.
+
 .. setting:: loghandlers
 
 ``loghandlers``
@@ -541,6 +551,18 @@ Advanced Consumer Settings
 
 The maximum amount of data per-partition the server will return. This size
 must be at least as large as the maximum message size.
+
+.. setting:: consumer_auto_offset_reset
+
+``consumer_auto_offset_reset``
+------------------------------
+
+:type: :class:`string`
+:default: ``earliest``
+
+Where the consumer should start reading messages from when there is no initial
+offset, or the stored offset no longer exists, e.g. when starting a new
+consumer for the first time. Options include 'earliest', 'latest', 'none'.
 
 .. _settings-producer:
 
@@ -958,6 +980,27 @@ By default this will bind to all interfaces.
 
 This option is usually set by :option:`faust worker --web-bind`,
 not by passing it as a keyword argument to :class:`app`.
+
+.. setting:: web_in_thread
+
+``web_in_thread``
+-----------------
+
+.. versionadded:: 1.5
+
+:type: :class:`bool`
+:default: :const:`False`
+
+Run the web server in a separate thread.
+
+Use this if you have a large value for :setting:`stream_buffer_maxsize`
+and want the web server to be responsive when the worker is otherwise
+busy processing streams.
+
+.. note::
+
+    Running the web server in a separate thread means web views
+    and agents will not share the same event loop.
 
 .. _settings-agent:
 
